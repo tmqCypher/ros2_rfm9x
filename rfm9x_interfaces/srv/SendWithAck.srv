@@ -1,0 +1,13 @@
+# Descriptions from the RFM9x class source file at
+# https://github.com/adafruit/Adafruit_CircuitPython_RFM9x/blob/main/adafruit_rfm9x.py
+
+# Reliable Datagram mode:
+# Send a packet with data and wait for an ACK response.
+# The packet header is automatically generated.
+# If enabled, the packet transmission will be retried on failure
+uint8[<=252] payload
+---
+# Returns True if ack is received.
+# Returns False if no ack is received after the max number of
+# attempts defined by the ack_retries attribute
+bool ack_received
