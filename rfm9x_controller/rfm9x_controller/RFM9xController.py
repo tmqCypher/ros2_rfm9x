@@ -1,15 +1,16 @@
-import time
 import adafruit_rfm9x
 import board
 import busio
 import digitalio
 
 import rclpy
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
+from rclpy.executors import Executor, MultiThreadedExecutor
 from rclpy.node import Node
 from rcl_interfaces.msg import IntegerRange, ParameterDescriptor, SetParametersResult
 
-from rfm9x_interfaces.srv import Receive, Send, SendWithAck
+from rfm9x_interfaces.srv import Receive, Send
+import rfm9x_interfaces.msg
 
 class RFM9xController(Node):
     '''Provides a ROS2 interface to an Adafruit RFM9x radio module.
@@ -20,6 +21,7 @@ class RFM9xController(Node):
     '''
     def __init__(
             self,
+            executor: Executor,
             spi: busio.SPI,
             cs: digitalio.DigitalInOut,
             reset: digitalio.DigitalInOut,
@@ -50,14 +52,15 @@ class RFM9xController(Node):
         '''
         super().__init__(node_name='rmf9x_controller', parameter_overrides=[])
 
-        self.rfm9x = None
-        self.timer = None
-
         # These depend on wiring and should not be modified after
         # the RFM9xController is initialized.
         self._spi = spi
         self._cs = cs
         self._reset = reset
+
+        self.log = self.get_logger()
+        self.executor: Executor = executor
+        self._timer_callback_group = MutuallyExclusiveCallbackGroup()
 
         self.declare_parameter('frequency', frequency, ParameterDescriptor(
             name='frequency', type=2, read_only=True,
@@ -112,33 +115,26 @@ class RFM9xController(Node):
                          'for values > 20 the PA_BOOST will be enabled resulting in '
                          'an additional gain of 3dBm. The actual setting is reduced '
                          'by 3dBm. The reported value will reflect the reduced setting.')))
-        self.declare_parameter('ack_wait', 0.5, ParameterDescriptor(
-            name='ack_wait', type=3,
-            description=('The delay time before attempting a retry after not '
-                         'receiving an ACK.')))
         self.declare_parameter('receive_timeout', 0.5, ParameterDescriptor(
             name='receive_timeout', type=3,
             description=('The amount of time to poll for a received packet. '
                          'If no packet is received, the returned packet will be None.')))
         self.declare_parameter('xmit_timeout', 2.0, ParameterDescriptor(
             name='xmit_timeout', type=3,
-            description=('The amount of time to wait ofr the HW to transmit the '
+            description=('The amount of time to wait for the HW to transmit the '
                          'packet. This is mainly used to prevent a hang due to a HW '
                          'issue.')))
-        self.declare_parameter('ack_retries', 5, ParameterDescriptor(
-            name='ack_retries', type=2,
-            description='The number of ACK retries before reporting a failure.'))
         self.declare_parameter('ack_delay', 0.0, ParameterDescriptor(
             name='ack_delay', type=3,
             description=('The delay time before attempting to send an ACK. If '
                          'ACKs are being missed try setting this to 0.1 or 0.2.')))
-        self.declare_parameter('node', 255, ParameterDescriptor(
+        self.declare_parameter('node', 0x01, ParameterDescriptor(
             name='node', type=2,
             integer_range=[IntegerRange(from_value=0, to_value=255)],
             description=('The default address of this Node. If not 255 (0xff) '
                          'then only packets addressed to this node will be accepted. '
                          'First byte of the RadioHead header.')))
-        self.declare_parameter('destination', 255, ParameterDescriptor(
+        self.declare_parameter('destination', 0x00, ParameterDescriptor(
             name='destination', type=2,
             integer_range=[IntegerRange(from_value=0, to_value=255)],
             description=('The default destination address for packet '
@@ -147,12 +143,14 @@ class RFM9xController(Node):
 
         self.add_on_set_parameters_callback(self._set_parameters_callback)
 
-        self.receive = self.create_service(Receive, 'receive',
-                self._receive_callback)
-        self.send = self.create_service(Send, 'send',
-                self._send_callback)
-        self.send_with_ack = self.create_service(SendWithAck, 'send_with_ack', 
-                self._send_with_ack_callback)
+        # Publish received commands for command parser
+        self._cmd_pub = self.create_publisher(rfm9x_interfaces.msg.Payload, 'cmd_data', 10)
+        # .. at intervals of 1 second
+        self._listen_timer = self.create_timer(1.0, self._listen_timer_callback, self._timer_callback_group)
+
+        # Subscribe to telemetry data
+        self._telem_sub = self.create_subscription(rfm9x_interfaces.msg.Payload,
+                'serialized_telemetry', self._telem_sub_callback, 1)
 
         # Bind node to radio device
         try:
@@ -170,106 +168,37 @@ class RFM9xController(Node):
             self.log.fatal(f'Exception raised while initalizing RFM9xController: {str(exc)}')
             raise RuntimeError from exc
 
-        self.log = self.get_logger()
-        self.log.info('Initialized')
-
-
     def _set_parameters_callback(self, params) -> SetParametersResult:
         # TODO: Validate changed parameters
         return SetParametersResult(successful=True)
 
-    def _receive_callback(self, request, response):
-        if self.rfm9x is None:
-            return self._not_bound_response(response)
+    def _telem_sub_callback(self, msg):
+        '''Transmit telemetry data'''
+        telem_bytes = bytes(msg.payload)
+        self.rfm9x.send(telem_bytes, keep_listening=True)
 
-        packet = self.rfm9x.receive(
-                keep_listening=request.keep_listening,
-                with_header=request.with_header,
-                with_ack=request.with_ack,
-                timeout=(request.receive_timeout if request.override_receive_timeout else None))
-
-        if packet is None:
-            response.success = False
-            return response
-        else:
-            response.success = True
-            header_log_str = 'Not requested'
-            if request.with_header:
-                response.header.destination = packet[0]
-                response.header.node = packet[1]
-                response.header.identifier = packet[2]
-                response.header.flags = packet[3]
-                response.payload = packet[4:]
-                header_log_str = (f'destination: {response.header.destination}, '
-                                  f'node: {response.header.node}, identifier: '
-                                  f'{response.header.identifier}, '
-                                  f'flags: {response.header.flags}')
-            else:
-                response.payload = packet[:]
-
-            self.log.info((f'Received packet\nHeader: {header_log_str}\n'
-                           f'Payload: {str(response.payload, "utf-8")}'))
-
-            return response
-
-    def _send_callback(self, request, response):
-        if self.rfm9x is None:
-            return self._not_bound_response(response)
-
-        destination=(request.header.destination if request.override_destination else None)
-        node=(request.header.node if request.override_node else None)
-        identifier=(request.header.identifier if request.override_identifier else None)
-        flags=(request.header.flags if request.override_flags else None)
-
-        start_time = time.time()
-        response.result = self.rfm9x.send(
-                request.payload,
-                keep_listening=request.keep_listening,
-                destination=destination,
-                node=node,
-                identifier=identifier,
-                flags=flags)
-        end_time = time.time()
-
-        if response.result:
-            self.log.info((f'Transmission sent ({end_time - start_time})\n'
-                           f'Header: destination: {destination}, node: {node}, '
-                           f'identifier: {identifier}, flags: {flags}\n'
-                           f'Payload: {str(request.payload, "utf-8")}'))
-        else:
-            self.log.warning('Send request timed out')
-
-        return response
-
-    def _send_with_ack_callback(self, request, response):
-        if self.rfm9x is None:
-            return self._not_bound_response(response)
-
-        # TODO: Logging
-        response.ack_received = self.rfm9x.send_with_ack(request.payload)
-        return response
-
-    def _not_bound_response(self, response):
-        msg = 'Node is not bound to a device'
-        self.log.error(msg)
-        response.success = False
-        response.message = msg
-        return response
-
+    def _listen_timer_callback(self):
+        '''Listen for controller messages'''
+        if (ctrl_msg := self.rfm9x.receive(with_ack=True)) is not None:
+            data_array = [byte for byte in ctrl_msg]
+            self._cmd_pub.publish(rfm9x_interfaces.msg.Payload(payload=data_array))
 
 def main(args=None):
     rclpy.init(args=args)
 
+    executor = MultiThreadedExecutor()
     CS = digitalio.DigitalInOut(board.CE1)
     RESET = digitalio.DigitalInOut(board.D25)
     spi = busio.SPI(board.SCK, MOSI=board.MOSI, MISO=board.MISO)
-    node = RFM9xController(spi, CS, RESET, 915)
+    node = RFM9xController(executor, spi, CS, RESET, 915)
+    executor.add_node(node)
 
     node.get_logger().info('Running')
-    rclpy.spin(node)
+    executor.spin()
 
     node.destroy_node()
     rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
+
