@@ -15,12 +15,11 @@ find_package(rosidl_default_generators REQUIRED)
 set(msg_files
     "msg/Payload.msg"
     "msg/Header.msg"
+    "msg/ID.msg"
 )
 
 set(srv_files
-    "srv/Receive.srv"
-    "srv/Send.srv"
-    "srv/SendWithAck.srv"
+
 )
 
 set(action_files

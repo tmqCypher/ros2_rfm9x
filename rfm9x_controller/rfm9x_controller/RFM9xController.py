@@ -9,7 +9,6 @@ from rclpy.executors import Executor, MultiThreadedExecutor
 from rclpy.node import Node
 from rcl_interfaces.msg import IntegerRange, ParameterDescriptor, SetParametersResult
 
-from rfm9x_interfaces.srv import Receive, Send
 import rfm9x_interfaces.msg
 
 class RFM9xController(Node):
@@ -150,7 +149,7 @@ class RFM9xController(Node):
 
         # Subscribe to telemetry data
         self._telem_sub = self.create_subscription(rfm9x_interfaces.msg.Payload,
-                'serialized_telemetry', self._telem_sub_callback, 1)
+                'telem_data', self._telem_sub_callback, 1)
 
         # Bind node to radio device
         try:
@@ -170,16 +169,18 @@ class RFM9xController(Node):
 
     def _set_parameters_callback(self, params) -> SetParametersResult:
         # TODO: Validate changed parameters
-        return SetParametersResult(successful=True)
+        raise NotImplementedError('Parameter setting unimplemented. Edit values in source')
 
     def _telem_sub_callback(self, msg):
         '''Transmit telemetry data'''
+        self.log.info('Sending telemetry')
         telem_bytes = bytes(msg.payload)
         self.rfm9x.send(telem_bytes, keep_listening=True)
 
     def _listen_timer_callback(self):
         '''Listen for controller messages'''
         if (ctrl_msg := self.rfm9x.receive(with_ack=True)) is not None:
+            self.log.info('Received controller message')
             data_array = [byte for byte in ctrl_msg]
             self._cmd_pub.publish(rfm9x_interfaces.msg.Payload(payload=data_array))
 
