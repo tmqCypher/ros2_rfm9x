@@ -9,7 +9,7 @@ from rclpy.executors import Executor, MultiThreadedExecutor
 from rclpy.node import Node
 from rcl_interfaces.msg import IntegerRange, ParameterDescriptor, SetParametersResult
 
-import rfm9x_interfaces.msg
+from robosub_interfaces.msg import RFM9xPayload
 
 class RFM9xController(Node):
     '''Provides a ROS2 interface to an Adafruit RFM9x radio module.
@@ -143,12 +143,12 @@ class RFM9xController(Node):
         self.add_on_set_parameters_callback(self._set_parameters_callback)
 
         # Publish received commands for command parser
-        self._cmd_pub = self.create_publisher(rfm9x_interfaces.msg.Payload, 'cmd_data', 10)
+        self._cmd_pub = self.create_publisher(RFM9xPayload, 'cmd_data', 10)
         # .. at intervals of 1 second
         self._listen_timer = self.create_timer(1.0, self._listen_timer_callback, self._timer_callback_group)
 
         # Subscribe to telemetry data
-        self._telem_sub = self.create_subscription(rfm9x_interfaces.msg.Payload,
+        self._telem_sub = self.create_subscription(RFM9xPayload,
                 'telem_data', self._telem_sub_callback, 1)
 
         # Bind node to radio device
@@ -174,15 +174,14 @@ class RFM9xController(Node):
     def _telem_sub_callback(self, msg):
         '''Transmit telemetry data'''
         self.log.info('Sending telemetry')
-        telem_bytes = bytes(msg.payload)
-        self.rfm9x.send(telem_bytes, keep_listening=True)
+        self.rfm9x.send(bytes(msg.payload), keep_listening=True)
 
     def _listen_timer_callback(self):
         '''Listen for controller messages'''
         if (ctrl_msg := self.rfm9x.receive(with_ack=True)) is not None:
             self.log.info('Received controller message')
             data_array = [byte for byte in ctrl_msg]
-            self._cmd_pub.publish(rfm9x_interfaces.msg.Payload(payload=data_array))
+            self._cmd_pub.publish(RFM9xPayload(payload=data_array))
 
 def main(args=None):
     rclpy.init(args=args)

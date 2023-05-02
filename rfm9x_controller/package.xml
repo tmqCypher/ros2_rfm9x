@@ -11,7 +11,7 @@
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
-  <depend>rfm9x_interfaces</depend>
+  <depend>robosub_interfaces</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
